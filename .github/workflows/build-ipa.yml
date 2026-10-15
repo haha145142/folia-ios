@@ -19,8 +19,6 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     env:
-      TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-      BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'com.xxx.folia' }}
       BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
       P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
       PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
@@ -74,13 +72,61 @@ jobs:
           }
           xcodebuild -list -project FoliaPlayer.xcodeproj
 
+      - name: Read Team ID and Bundle ID from provisioning profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$PROVISIONING_PROFILE_BASE64" ]] || {
+            echo '::error::Add the PROVISIONING_PROFILE_BASE64 repository secret first.'
+            exit 1
+          }
+          PROFILE_PATH="$RUNNER_TEMP/embedded.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
+          printf '%s' "$PROVISIONING_PROFILE_BASE64" | base64 -D > "$PROFILE_PATH"
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PROFILE_PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$PROFILE_PLIST")
+          PROFILE_TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$PROFILE_PLIST")
+          PROFILE_APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$PROFILE_PLIST")
+          PROFILE_GET_TASK_ALLOW=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$PROFILE_PLIST")
+
+          [[ -n "$PROFILE_TEAM_ID" && -n "$PROFILE_APP_ID" ]] || {
+            echo '::error::Provisioning profile does not contain Team ID or application-identifier.'
+            exit 1
+          }
+          BUNDLE_ID="${PROFILE_APP_ID#*.}"
+          [[ -n "$BUNDLE_ID" && "$BUNDLE_ID" != *"*"* ]] || {
+            echo '::error::Use an explicit App ID profile, not a wildcard profile.'
+            exit 1
+          }
+
+          if [[ "$PROFILE_GET_TASK_ALLOW" == "true" ]]; then
+            EXPORT_METHOD="development"
+          elif /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices:0' "$PROFILE_PLIST" >/dev/null 2>&1; then
+            EXPORT_METHOD="ad-hoc"
+          else
+            echo '::error::Use an iOS Development or Ad Hoc profile with registered devices; App Store profiles are not supported by this workflow.'
+            exit 1
+          fi
+
+          {
+            echo "TEAM_ID=$PROFILE_TEAM_ID"
+            echo "BUNDLE_ID=$BUNDLE_ID"
+            echo "PROFILE_PATH=$PROFILE_PATH"
+            echo "PROFILE_PLIST=$PROFILE_PLIST"
+            echo "PROFILE_UUID=$PROFILE_UUID"
+            echo "PROFILE_NAME=$PROFILE_NAME"
+            echo "EXPORT_METHOD=$EXPORT_METHOD"
+          } >> "$GITHUB_ENV"
+          echo "Detected a compatible $EXPORT_METHOD provisioning profile."
+
       - name: Validate manual signing configuration
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "$TEAM_ID" ]] || { echo '::error::Set Actions variable APPLE_TEAM_ID.'; exit 1; }
-          [[ -n "$BUNDLE_ID" && "$BUNDLE_ID" != "com.xxx.folia" ]] || {
-            echo '::error::Set IOS_BUNDLE_ID to your registered Bundle ID.'
+          [[ -n "$TEAM_ID" && -n "$BUNDLE_ID" ]] || {
+            echo '::error::Could not read Team ID and Bundle ID from the provisioning profile.'
             exit 1
           }
           [[ -n "$BUILD_CERTIFICATE_BASE64" ]] || { echo '::error::Set secret BUILD_CERTIFICATE_BASE64.'; exit 1; }
@@ -96,12 +142,10 @@ jobs:
           set -euo pipefail
           KEYCHAIN_PATH="$RUNNER_TEMP/folia-signing.keychain-db"
           CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
-          PROFILE_PATH="$RUNNER_TEMP/embedded.mobileprovision"
-          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
+          PROFILE_PATH="$PROFILE_PATH"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
           printf '%s' "$BUILD_CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
-          printf '%s' "$PROVISIONING_PROFILE_BASE64" | base64 -D > "$PROFILE_PATH"
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
@@ -111,23 +155,8 @@ jobs:
           security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" -A -f pkcs12
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PROFILE_PLIST")
-          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$PROFILE_PLIST")
-          PROFILE_TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$PROFILE_PLIST")
-          PROFILE_APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$PROFILE_PLIST")
-          PROFILE_GET_TASK_ALLOW=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$PROFILE_PLIST")
-
-          [[ "$PROFILE_TEAM_ID" == "$TEAM_ID" ]] || {
-            echo '::error::Provisioning profile Team ID mismatch.'
-            exit 1
-          }
-          [[ "$PROFILE_APP_ID" == *".$BUNDLE_ID" ]] || {
-            echo "::error::Provisioning profile App ID ($PROFILE_APP_ID) does not match $BUNDLE_ID."
-            exit 1
-          }
-          [[ "$PROFILE_GET_TASK_ALLOW" == "false" ]] || {
-            echo '::error::Use an Ad Hoc profile (get-task-allow=false).'
+          [[ -f "$PROFILE_PATH" ]] || {
+            echo '::error::Provisioning profile was not prepared.'
             exit 1
           }
 
