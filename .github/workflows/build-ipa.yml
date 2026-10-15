@@ -1,0 +1,212 @@
+name: Build FoliaPlayer IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.source/**'
+      - 'FoliaPlayer/**'
+      - 'FoliaPlayer.xcodeproj/**'
+      - 'ExportOptions.plist.template'
+      - '.github/workflows/build-ipa.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'com.xxx.folia' }}
+      BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+      P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+      PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore Xcode source files from bootstrap package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f "FoliaPlayer.xcodeproj/project.pbxproj" ]]; then
+            echo "Restoring the initial FoliaPlayer project..."
+            SOURCE_ARCHIVE="$RUNNER_TEMP/folia-source.tar.gz"
+            cat .source/archive-*.b64 | base64 -D > "$SOURCE_ARCHIVE"
+            tar -tzf "$SOURCE_ARCHIVE" >/dev/null
+            mkdir -p "$RUNNER_TEMP/folia-unpack"
+            tar -xzf "$SOURCE_ARCHIVE" -C "$RUNNER_TEMP/folia-unpack"
+            cp -R "$RUNNER_TEMP/folia-unpack/FoliaPlayer-iOS/." "$GITHUB_WORKSPACE/"
+
+            # Use the macOS/BSD base64 decode switch in the persisted workflow.
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path(".github/workflows/build-ipa.yml")
+          if p.exists():
+              s = p.read_text(encoding="utf-8")
+              s = s.replace("base64 --decode", "base64 -D")
+              p.write_text(s, encoding="utf-8")
+          PY
+
+            rm -rf .source
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            if ! git diff --cached --quiet; then
+              git commit -m "Add FoliaPlayer iOS project sources"
+              git push origin HEAD:main
+            fi
+          else
+            echo "Project sources are already present."
+          fi
+
+      - name: Select Xcode 16.x
+        shell: bash
+        run: |
+          set -euo pipefail
+          XCODE_APP="$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort | tail -n 1 || true)"
+          if [[ -n "$XCODE_APP" ]]; then
+            sudo xcode-select --switch "$XCODE_APP/Contents/Developer"
+          fi
+          xcodebuild -version
+          xcodebuild -version | grep -Eq 'Xcode 16\.' || {
+            echo '::error::This workflow requires Xcode 16.x on the macos-15 runner.'
+            exit 1
+          }
+          xcodebuild -list -project FoliaPlayer.xcodeproj
+
+      - name: Validate manual signing configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$TEAM_ID" ]] || { echo '::error::Set Actions variable APPLE_TEAM_ID.'; exit 1; }
+          [[ -n "$BUNDLE_ID" && "$BUNDLE_ID" != "com.xxx.folia" ]] || {
+            echo '::error::Set IOS_BUNDLE_ID to your registered Bundle ID.'
+            exit 1
+          }
+          [[ -n "$BUILD_CERTIFICATE_BASE64" ]] || { echo '::error::Set secret BUILD_CERTIFICATE_BASE64.'; exit 1; }
+          [[ -n "$P12_PASSWORD" ]] || { echo '::error::Set secret P12_PASSWORD.'; exit 1; }
+          [[ -n "$PROVISIONING_PROFILE_BASE64" ]] || { echo '::error::Set secret PROVISIONING_PROFILE_BASE64.'; exit 1; }
+          [[ -n "$KEYCHAIN_PASSWORD" ]] || { echo '::error::Set secret KEYCHAIN_PASSWORD.'; exit 1; }
+          echo "Using configured Bundle ID: $BUNDLE_ID"
+          echo "Using configured Team ID: $TEAM_ID"
+
+      - name: Create temporary keychain and install signing assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/folia-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          PROFILE_PATH="$RUNNER_TEMP/embedded.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+          printf '%s' "$PROVISIONING_PROFILE_BASE64" | base64 -D > "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" -A -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PROFILE_PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$PROFILE_PLIST")
+          PROFILE_TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$PROFILE_PLIST")
+          PROFILE_APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$PROFILE_PLIST")
+          PROFILE_GET_TASK_ALLOW=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$PROFILE_PLIST")
+
+          [[ "$PROFILE_TEAM_ID" == "$TEAM_ID" ]] || {
+            echo '::error::Provisioning profile Team ID mismatch.'
+            exit 1
+          }
+          [[ "$PROFILE_APP_ID" == *".$BUNDLE_ID" ]] || {
+            echo "::error::Provisioning profile App ID ($PROFILE_APP_ID) does not match $BUNDLE_ID."
+            exit 1
+          }
+          [[ "$PROFILE_GET_TASK_ALLOW" == "false" ]] || {
+            echo '::error::Use an Ad Hoc profile (get-task-allow=false).'
+            exit 1
+          }
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(Apple Distribution:.*\)"/\1/p' | head -n 1)"
+          [[ -n "$SIGNING_IDENTITY" ]] || {
+            echo '::error::No Apple Distribution identity found. Export the P12 with its private key.'
+            exit 1
+          }
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          {
+            echo "PROFILE_NAME=$PROFILE_NAME"
+            echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Archive for iOS device
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcodebuild archive \
+            -project FoliaPlayer.xcodeproj \
+            -scheme FoliaPlayer \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/FoliaPlayer.xcarchive" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            | tee "$RUNNER_TEMP/xcode-archive.log"
+
+      - name: Export IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_OPTIONS="$RUNNER_TEMP/ExportOptions.plist"
+          python3 - "$PWD/ExportOptions.plist.template" "$EXPORT_OPTIONS" "$TEAM_ID" "$BUNDLE_ID" "$PROFILE_NAME" <<'PY'
+          import pathlib, sys
+          from xml.sax.saxutils import escape
+          template_path, output_path, team_id, bundle_id, profile_name = sys.argv[1:]
+          content = pathlib.Path(template_path).read_text(encoding="utf-8")
+          for old, new in {
+              "__TEAM_ID__": team_id,
+              "__BUNDLE_ID__": bundle_id,
+              "__PROFILE_NAME__": profile_name,
+          }.items():
+              content = content.replace(old, escape(new))
+          pathlib.Path(output_path).write_text(content, encoding="utf-8")
+          PY
+          plutil -lint "$EXPORT_OPTIONS"
+          mkdir -p build/ipa
+          xcodebuild -exportArchive \
+            -archivePath "$PWD/build/FoliaPlayer.xcarchive" \
+            -exportPath "$PWD/build/ipa" \
+            -exportOptionsPlist "$EXPORT_OPTIONS" \
+            | tee "$RUNNER_TEMP/xcode-export.log"
+          test -n "$(find build/ipa -type f -name '*.ipa' -print -quit)"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FoliaPlayer-IPA
+          path: build/ipa/*.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove temporary keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "$KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          fi
