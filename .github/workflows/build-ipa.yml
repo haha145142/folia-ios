@@ -29,8 +29,10 @@ jobs:
           if [[ -n "$XCODE_APP" ]]; then
             sudo xcode-select --switch "$XCODE_APP/Contents/Developer"
           fi
-          xcodebuild -version
-          xcodebuild -version | grep -Eq 'Xcode 16\.' || {
+          xcodebuild -version > "$RUNNER_TEMP/xcode-version.txt" 2>&1
+          cat "$RUNNER_TEMP/xcode-version.txt"
+          XCODE_VERSION="$(sed -n '1p' "$RUNNER_TEMP/xcode-version.txt")"
+          [[ "$XCODE_VERSION" == Xcode\ 16.* ]] || {
             echo '::error::This workflow requires Xcode 16.x on the macos-15 runner.'
             exit 1
           }
