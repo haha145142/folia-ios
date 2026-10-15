@@ -196,15 +196,16 @@ jobs:
         run: |
           set -euo pipefail
           EXPORT_OPTIONS="$RUNNER_TEMP/ExportOptions.plist"
-          python3 - "$PWD/ExportOptions.plist.template" "$EXPORT_OPTIONS" "$TEAM_ID" "$BUNDLE_ID" "$PROFILE_NAME" <<'PY'
+          python3 - "$PWD/ExportOptions.plist.template" "$EXPORT_OPTIONS" "$TEAM_ID" "$BUNDLE_ID" "$PROFILE_NAME" "$EXPORT_METHOD" <<'PY'
           import pathlib, sys
           from xml.sax.saxutils import escape
-          template_path, output_path, team_id, bundle_id, profile_name = sys.argv[1:]
+          template_path, output_path, team_id, bundle_id, profile_name, export_method = sys.argv[1:]
           content = pathlib.Path(template_path).read_text(encoding="utf-8")
           for old, new in {
               "__TEAM_ID__": team_id,
               "__BUNDLE_ID__": bundle_id,
               "__PROFILE_NAME__": profile_name,
+              "__METHOD__": export_method,
           }.items():
               content = content.replace(old, escape(new))
           pathlib.Path(output_path).write_text(content, encoding="utf-8")
