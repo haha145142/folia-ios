@@ -43,15 +43,9 @@ jobs:
             tar -xzf "$SOURCE_ARCHIVE" -C "$RUNNER_TEMP/folia-unpack"
             cp -R "$RUNNER_TEMP/folia-unpack/FoliaPlayer-iOS/." "$GITHUB_WORKSPACE/"
 
-            # Use the macOS/BSD base64 decode switch in the persisted workflow.
-            python3 - <<'PY'
-          from pathlib import Path
-          p = Path(".github/workflows/build-ipa.yml")
-          if p.exists():
-              s = p.read_text(encoding="utf-8")
-              s = s.replace("base64 --decode", "base64 -D")
-              p.write_text(s, encoding="utf-8")
-          PY
+            # The source archive contains a starter workflow. Keep the current
+            # repository workflow so the Actions token does not need workflow-file write permission.
+            git checkout HEAD -- .github/workflows/build-ipa.yml
 
             rm -rf .source
             git config user.name "github-actions[bot]"
