@@ -61,14 +61,7 @@ FoliaPlayer-iOS/
 
 ## GitHub Actions 配置
 
-进入 GitHub 仓库 **Settings → Secrets and variables → Actions**。
-
-### Repository Variables（变量）
-
-| 变量名 | 值 |
-|---|---|
-| `APPLE_TEAM_ID` | Apple Developer Team ID（通常为 10 位字母数字） |
-| `IOS_BUNDLE_ID` | 已在 Apple Developer 注册的显式 Bundle ID，例如 `com.yourname.folia`；不能直接沿用未注册的 `com.xxx.folia` |
+进入 GitHub 仓库 **Settings → Secrets and variables → Actions**。本工作流会从 mobileprovision 自动读取 Team ID、Bundle ID 和描述文件类型，因此不用手动填写 Repository Variables。
 
 ### Repository Secrets（机密）
 
@@ -79,7 +72,7 @@ FoliaPlayer-iOS/
 | `PROVISIONING_PROFILE_BASE64` | 与 Team ID、Bundle ID、Apple Distribution 证书匹配的 Ad Hoc `.mobileprovision` 单行 Base64 内容 |
 | `KEYCHAIN_PASSWORD` | GitHub Actions 临时 keychain 的自定义密码；设置为一段强随机值，不需要等于 P12 密码 |
 
-工作流默认 `method = ad-hoc`。Ad Hoc 描述文件必须包含你准备安装 IPA 的 iPhone/iPad UDID。若是发给自己测试，先在 Apple Developer 账号注册设备，再创建 Ad Hoc Provisioning Profile，并把对应描述文件放入 Secret。
+工作流会根据描述文件自动选择 `development` 或 `ad-hoc` 导出方式。描述文件必须是带明确 App ID 的 iOS Development 或 Ad Hoc 类型；Ad Hoc 描述文件必须包含你准备安装 IPA 的 iPhone/iPad UDID。App Store 分发描述文件不适用于这条个人设备安装流程。
 
 ### 如何从 Mac 生成 Base64
 
@@ -104,7 +97,7 @@ Linux 上如需生成 Base64，可以使用 `base64 -w 0 文件路径`；macOS �
 3. 打开仓库 **Actions → Build FoliaPlayer IPA → Run workflow**，或推送对项目/工作流的更改到 `main`。
 4. 任务成功后，打开本次 workflow run 页面，在 **Artifacts** 中下载 `FoliaPlayer-IPA`，解压即可取得 `.ipa`。
 
-工作流会从 provisioning profile 自动读取 UUID、名称、Team ID 和 App ID；创建一次性 keychain、导入证书、安装描述文件，然后 Archive 与 Export IPA。它会在导出前校验 profile 的 Team ID 和 App ID，避免常见的签名不匹配问题。
+工作流会从 provisioning profile 自动读取 UUID、名称、Team ID、App ID 和导出方式；创建一次性 keychain、导入证书、安装描述文件，然后 Archive 与 Export IPA。它会校验 profile 是否为明确的 App ID，并要求 Development/Ad Hoc 描述文件带有已注册设备。
 
 ## 本地构建
 
